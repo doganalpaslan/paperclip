@@ -196,6 +196,13 @@ function unreadForUserCondition(companyId: string, userId: string) {
   `;
 }
 
+const HTML_ENTITY_IN_MENTION = /&#x[0-9a-fA-F]+;|&#[0-9]+;|&[a-z]+;/gi;
+
+/** Strips common HTML entities from a raw @mention capture so UI-encoded bodies still match agent names. */
+export function normalizeAgentMentionToken(raw: string): string {
+  return raw.replace(HTML_ENTITY_IN_MENTION, "").trim();
+}
+
 export function deriveIssueUserContext(
   issue: IssueUserContextInput,
   userId: string,
@@ -1446,7 +1453,10 @@ export function issueService(db: Db) {
       const re = /\B@([^\s@,!?.]+)/g;
       const tokens = new Set<string>();
       let m: RegExpExecArray | null;
-      while ((m = re.exec(body)) !== null) tokens.add(m[1].toLowerCase());
+      while ((m = re.exec(body)) !== null) {
+        const normalized = normalizeAgentMentionToken(m[1]);
+        if (normalized) tokens.add(normalized.toLowerCase());
+      }
       if (tokens.size === 0) return [];
       const rows = await db.select({ id: agents.id, name: agents.name })
         .from(agents).where(eq(agents.companyId, companyId));
