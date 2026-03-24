@@ -248,9 +248,11 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     }
     if (overlay.adapterType !== undefined) {
       patch.adapterType = overlay.adapterType;
-      // When adapter type changes, send only the new config — don't merge
-      // with old config since old adapter fields are meaningless for the new type
-      patch.adapterConfig = overlay.adapterConfig;
+      // Merge: start from existing config (preserves shared fields like cwd,
+      // promptTemplate, instructionsFilePath, etc.), then overlay adapter-specific
+      // resets so old adapter values don't bleed through.
+      const existing = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+      patch.adapterConfig = { ...existing, ...overlay.adapterConfig };
     } else if (Object.keys(overlay.adapterConfig).length > 0) {
       const existing = (agent.adapterConfig ?? {}) as Record<string, unknown>;
       patch.adapterConfig = { ...existing, ...overlay.adapterConfig };
