@@ -285,6 +285,26 @@ export function agentRoutes(db: Db) {
     };
   }
 
+  function redactAgentSecrets<T extends { adapterConfig?: unknown; runtimeConfig?: unknown }>(agent: T): T {
+    let result = { ...agent };
+    const config = asRecord(agent.adapterConfig);
+    if (config) {
+      const env = asRecord(config.env);
+      if (env) {
+        const redactedEnv: Record<string, string> = {};
+        for (const key of Object.keys(env)) {
+          redactedEnv[key] = "***";
+        }
+        result.adapterConfig = { ...config, env: redactedEnv } as T["adapterConfig"];
+      }
+    }
+    const rtConfig = asRecord(agent.runtimeConfig);
+    if (rtConfig) {
+      result.runtimeConfig = redactEventPayload(rtConfig) as T["runtimeConfig"];
+    }
+    return result;
+  }
+
   function redactAgentConfiguration(agent: Awaited<ReturnType<typeof svc.getById>>) {
     if (!agent) return null;
     return {
@@ -407,7 +427,7 @@ export function agentRoutes(db: Db) {
     const result = await svc.list(companyId);
     const canReadConfigs = await actorCanReadConfigurationsForCompany(req, companyId);
     if (canReadConfigs || req.actor.type === "board") {
-      res.json(result);
+      res.json(result.map((agent) => redactAgentSecrets(agent)));
       return;
     }
     res.json(result.map((agent) => redactForRestrictedAgentView(agent)));
@@ -439,7 +459,7 @@ export function agentRoutes(db: Db) {
       return;
     }
     const chainOfCommand = await svc.getChainOfCommand(agent.id);
-    res.json({ ...agent, chainOfCommand });
+    res.json(redactAgentSecrets({ ...agent, chainOfCommand }));
   });
 
   router.get("/agents/:id", async (req, res) => {
@@ -459,7 +479,7 @@ export function agentRoutes(db: Db) {
       }
     }
     const chainOfCommand = await svc.getChainOfCommand(agent.id);
-    res.json({ ...agent, chainOfCommand });
+    res.json(redactAgentSecrets({ ...agent, chainOfCommand }));
   });
 
   router.get("/agents/:id/configuration", async (req, res) => {
