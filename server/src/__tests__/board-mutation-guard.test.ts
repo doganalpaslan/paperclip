@@ -71,6 +71,17 @@ describe("boardMutationGuard", () => {
     expect(res.status).toBe(204);
   });
 
+  it("blocks board mutations when x-forwarded-host does not match origin", async () => {
+    const app = createApp("board");
+    const res = await request(app)
+      .post("/mutate")
+      .set("Host", "127.0.0.1")
+      .set("X-Forwarded-Host", "10.90.10.20:3443")
+      .set("Origin", "https://evil.example.com")
+      .send({ ok: true });
+    expect(res.status).toBe(403);
+  });
+
   it("does not block authenticated agent mutations", async () => {
     const app = createApp("agent");
     const res = await request(app).post("/mutate").send({ ok: true });
