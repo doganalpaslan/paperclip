@@ -154,6 +154,28 @@ export function issueRoutes(db: Db, storage: StorageService) {
     return true;
   }
 
+  async function resolveIssueProjectAndGoal(issue: {
+    companyId: string;
+    projectId: string | null;
+    goalId: string | null;
+  }) {
+    const projectPromise = issue.projectId ? projectsSvc.getById(issue.projectId) : Promise.resolve(null);
+    const directGoalPromise = issue.goalId ? goalsSvc.getById(issue.goalId) : Promise.resolve(null);
+    const [project, directGoal] = await Promise.all([projectPromise, directGoalPromise]);
+
+    if (directGoal) {
+      return { project, goal: directGoal };
+    }
+
+    const projectGoalId = project?.goalIds?.[0] ?? null;
+    if (projectGoalId) {
+      const projectGoal = await goalsSvc.getById(projectGoalId);
+      return { project, goal: projectGoal };
+    }
+
+    return { project, goal: null };
+  }
+
   async function normalizeIssueIdentifier(rawId: string): Promise<string> {
     if (/^[A-Z]+-\d+$/i.test(rawId)) {
       const issue = await svc.getByIdentifier(rawId);
@@ -761,6 +783,92 @@ export function issueRoutes(db: Db, storage: StorageService) {
     });
 
     res.json(released);
+  });
+
+  router.get("/issues/:id/heartbeat-context", async (req, res) => {
+    const MAX_DESCRIPTION_CHARS = 500;
+    const MAX_RECENT_COMMENTS = 3;
+    const MAX_COMMENT_CHARS = 300;
+
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+
+    const wakeCommentId =
+      typeof req.query.wakeCommentId === "string" && req.query.wakeCommentId.trim().length > 0
+        ? req.query.wakeCommentId.trim()
+        : null;
+
+    const [{ project, goal }, ancestors, commentCursor, wakeComment, recentComments] =
+      await Promise.all([
+        resolveIssueProjectAndGoal(issue),
+        svc.getAncestors(issue.id),
+        svc.getCommentCursor(issue.id),
+        wakeCommentId ? svc.getComment(wakeCommentId) : null,
+        svc.listComments(issue.id, { limit: MAX_RECENT_COMMENTS, order: "desc" }),
+      ]);
+
+    const truncate = (text: string | null, max: number) =>
+      text && text.length > max ? text.slice(0, max) + "…" : text;
+
+    const contextDescription = issue.workingSummary
+      ?? truncate(issue.description, MAX_DESCRIPTION_CHARS);
+
+    res.json({
+      issue: {
+        id: issue.id,
+        identifier: issue.identifier,
+        title: issue.title,
+        description: contextDescription,
+        workingSummary: issue.workingSummary ?? null,
+        status: issue.status,
+        priority: issue.priority,
+        projectId: issue.projectId,
+        goalId: goal?.id ?? issue.goalId,
+        parentId: issue.parentId,
+        assigneeAgentId: issue.assigneeAgentId,
+        assigneeUserId: issue.assigneeUserId,
+        updatedAt: issue.updatedAt,
+      },
+      ancestors: ancestors.map((ancestor) => ({
+        id: ancestor.id,
+        identifier: ancestor.identifier,
+        title: ancestor.title,
+        status: ancestor.status,
+        priority: ancestor.priority,
+      })),
+      project: project
+        ? {
+            id: project.id,
+            name: project.name,
+            status: project.status,
+          }
+        : null,
+      goal: goal
+        ? {
+            id: goal.id,
+            title: goal.title,
+            status: goal.status,
+            level: goal.level,
+          }
+        : null,
+      commentCursor,
+      wakeComment:
+        wakeComment && wakeComment.issueId === issue.id
+          ? wakeComment
+          : null,
+      recentComments: recentComments.map((c) => ({
+        id: c.id,
+        authorAgentId: c.authorAgentId,
+        authorUserId: c.authorUserId,
+        body: truncate(c.body, MAX_COMMENT_CHARS),
+        createdAt: c.createdAt,
+      })),
+    });
   });
 
   router.get("/issues/:id/comments", async (req, res) => {

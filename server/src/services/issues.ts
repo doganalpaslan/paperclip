@@ -1011,12 +1011,58 @@ export function issueService(db: Db) {
         .returning()
         .then((rows) => rows[0] ?? null),
 
-    listComments: (issueId: string) =>
-      db
+    listComments: async (
+      issueId: string,
+      opts?: {
+        afterCommentId?: string | null;
+        order?: "asc" | "desc";
+        limit?: number | null;
+      },
+    ) => {
+      const order = opts?.order === "asc" ? "asc" : "desc";
+      const limit =
+        opts?.limit && opts.limit > 0
+          ? Math.min(Math.floor(opts.limit), 500)
+          : null;
+
+      const query = db
         .select()
         .from(issueComments)
         .where(eq(issueComments.issueId, issueId))
-        .orderBy(desc(issueComments.createdAt)),
+        .orderBy(
+          order === "asc" ? asc(issueComments.createdAt) : desc(issueComments.createdAt),
+        );
+
+      return limit ? await query.limit(limit) : await query;
+    },
+
+    getCommentCursor: async (issueId: string) => {
+      const [latest, countRow] = await Promise.all([
+        db
+          .select({
+            latestCommentId: issueComments.id,
+            latestCommentAt: issueComments.createdAt,
+          })
+          .from(issueComments)
+          .where(eq(issueComments.issueId, issueId))
+          .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
+          .limit(1)
+          .then((rows) => rows[0] ?? null),
+        db
+          .select({
+            totalComments: sql<number>`count(*)::int`,
+          })
+          .from(issueComments)
+          .where(eq(issueComments.issueId, issueId))
+          .then((rows) => rows[0] ?? null),
+      ]);
+
+      return {
+        totalComments: Number(countRow?.totalComments ?? 0),
+        latestCommentId: latest?.latestCommentId ?? null,
+        latestCommentAt: latest?.latestCommentAt ?? null,
+      };
+    },
 
     getComment: (commentId: string) =>
       db
