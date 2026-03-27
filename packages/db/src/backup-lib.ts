@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import postgres from "postgres";
 
@@ -150,11 +150,17 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const nullifiedColumnsByTable = normalizeNullifyColumnMap(opts.nullifyColumns);
   const sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
 
+  // Write directly to a temp file to avoid accumulating the entire backup in memory.
+  // This prevents RangeError crashes on large databases (GH #1843).
+  mkdirSync(opts.backupDir, { recursive: true });
+  const backupFile = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}.sql`);
+  const tempFile = backupFile + ".tmp";
+
   try {
     await sql`SELECT 1`;
 
-    const lines: string[] = [];
-    const emit = (line: string) => lines.push(line);
+    const ws = createWriteStream(tempFile, { encoding: "utf8" });
+    const emit = (line: string) => { ws.write(line + "\n"); };
     const emitStatement = (statement: string) => {
       emit(statement);
       emit(STATEMENT_BREAKPOINT);
@@ -447,7 +453,8 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       emit("");
     }
 
-    // Dump data for each table
+    // Dump data for each table using cursor-based pagination to avoid OOM on large tables (GH #1843).
+    const DATA_PAGE_SIZE = 2_000;
     for (const { schema_name, tablename } of tables) {
       const qualifiedTableName = quoteQualifiedName(schema_name, tablename);
       const count = await sql.unsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM ${qualifiedTableName}`);
@@ -461,23 +468,39 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         ORDER BY ordinal_position
       `;
       const colNames = cols.map((c) => `"${c.column_name}"`).join(", ");
-
-      emit(`-- Data for: ${schema_name}.${tablename} (${count[0]!.n} rows)`);
-
-      const rows = await sql.unsafe(`SELECT * FROM ${qualifiedTableName}`).values();
       const nullifiedColumns = nullifiedColumnsByTable.get(tablename) ?? new Set<string>();
-      for (const row of rows) {
-        const values = row.map((rawValue: unknown, index) => {
-          const columnName = cols[index]?.column_name;
-          const val = columnName && nullifiedColumns.has(columnName) ? null : rawValue;
-          if (val === null || val === undefined) return "NULL";
-          if (typeof val === "boolean") return val ? "true" : "false";
-          if (typeof val === "number") return String(val);
-          if (val instanceof Date) return formatSqlLiteral(val.toISOString());
-          if (typeof val === "object") return formatSqlLiteral(JSON.stringify(val));
-          return formatSqlLiteral(String(val));
-        });
-        emitStatement(`INSERT INTO ${qualifiedTableName} (${colNames}) VALUES (${values.join(", ")});`);
+      const totalRows = count[0]!.n;
+
+      emit(`-- Data for: ${schema_name}.${tablename} (${totalRows} rows)`);
+
+      // Page through rows using LIMIT/OFFSET to avoid loading the entire table into memory.
+      let offset = 0;
+      while (offset < totalRows) {
+        const rows = await sql.unsafe(
+          `SELECT * FROM ${qualifiedTableName} LIMIT ${DATA_PAGE_SIZE} OFFSET ${offset}`,
+        ).values();
+
+        for (const row of rows) {
+          const values = row.map((rawValue: unknown, index) => {
+            const columnName = cols[index]?.column_name;
+            const val = columnName && nullifiedColumns.has(columnName) ? null : rawValue;
+            if (val === null || val === undefined) return "NULL";
+            if (typeof val === "boolean") return val ? "true" : "false";
+            if (typeof val === "number") return String(val);
+            if (val instanceof Date) return formatSqlLiteral(val.toISOString());
+            if (typeof val === "object") return formatSqlLiteral(JSON.stringify(val));
+            return formatSqlLiteral(String(val));
+          });
+          emitStatement(`INSERT INTO ${qualifiedTableName} (${colNames}) VALUES (${values.join(", ")});`);
+        }
+
+        offset += rows.length;
+        // If we got fewer rows than requested, we're done with this table
+        if (rows.length < DATA_PAGE_SIZE) break;
+
+        // Drain write stream backpressure periodically
+        if (!ws.writableNeedDrain) continue;
+        await new Promise<void>((resolve) => ws.once("drain", resolve));
       }
       emit("");
     }
@@ -503,10 +526,14 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
     emitStatement("COMMIT;");
     emit("");
 
-    // Write the backup file
-    mkdirSync(opts.backupDir, { recursive: true });
-    const backupFile = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}.sql`);
-    await writeFile(backupFile, lines.join("\n"), "utf8");
+    // Finalize the write stream
+    await new Promise<void>((resolve, reject) => {
+      ws.end(() => resolve());
+      ws.on("error", reject);
+    });
+
+    // Atomically rename temp file to final backup path
+    renameSync(tempFile, backupFile);
 
     const sizeBytes = statSync(backupFile).size;
     const prunedCount = pruneOldBackups(opts.backupDir, retentionDays, filenamePrefix);
@@ -516,6 +543,10 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       sizeBytes,
       prunedCount,
     };
+  } catch (err) {
+    // Clean up temp file on failure
+    try { unlinkSync(tempFile); } catch { /* ignore */ }
+    throw err;
   } finally {
     await sql.end();
   }
