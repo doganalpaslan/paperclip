@@ -375,6 +375,10 @@ export function issueRoutes(db: Db, storage: StorageService) {
   });
 
   router.get("/issues/:id/heartbeat-context", async (req, res) => {
+    const MAX_DESCRIPTION_CHARS = 500;
+    const MAX_RECENT_COMMENTS = 3;
+    const MAX_COMMENT_CHARS = 300;
+
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -388,19 +392,28 @@ export function issueRoutes(db: Db, storage: StorageService) {
         ? req.query.wakeCommentId.trim()
         : null;
 
-    const [{ project, goal }, ancestors, commentCursor, wakeComment] = await Promise.all([
-      resolveIssueProjectAndGoal(issue),
-      svc.getAncestors(issue.id),
-      svc.getCommentCursor(issue.id),
-      wakeCommentId ? svc.getComment(wakeCommentId) : null,
-    ]);
+    const [{ project, goal }, ancestors, commentCursor, wakeComment, recentComments] =
+      await Promise.all([
+        resolveIssueProjectAndGoal(issue),
+        svc.getAncestors(issue.id),
+        svc.getCommentCursor(issue.id),
+        wakeCommentId ? svc.getComment(wakeCommentId) : null,
+        svc.listComments(issue.id, { limit: MAX_RECENT_COMMENTS, order: "desc" }),
+      ]);
+
+    const truncate = (text: string | null, max: number) =>
+      text && text.length > max ? text.slice(0, max) + "…" : text;
+
+    const contextDescription = issue.workingSummary
+      ?? truncate(issue.description, MAX_DESCRIPTION_CHARS);
 
     res.json({
       issue: {
         id: issue.id,
         identifier: issue.identifier,
         title: issue.title,
-        description: issue.description,
+        description: contextDescription,
+        workingSummary: issue.workingSummary ?? null,
         status: issue.status,
         priority: issue.priority,
         projectId: issue.projectId,
@@ -439,6 +452,13 @@ export function issueRoutes(db: Db, storage: StorageService) {
         wakeComment && wakeComment.issueId === issue.id
           ? wakeComment
           : null,
+      recentComments: recentComments.map((c) => ({
+        id: c.id,
+        authorAgentId: c.authorAgentId,
+        authorUserId: c.authorUserId,
+        body: truncate(c.body, MAX_COMMENT_CHARS),
+        createdAt: c.createdAt,
+      })),
     });
   });
 

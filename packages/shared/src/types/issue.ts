@@ -104,6 +104,7 @@ export interface Issue {
   ancestors?: IssueAncestor[];
   title: string;
   description: string | null;
+  workingSummary: string | null;
   status: IssueStatus;
   priority: IssuePriority;
   assigneeAgentId: string | null;
