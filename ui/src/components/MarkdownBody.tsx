@@ -146,8 +146,9 @@ export function MarkdownBody({ children, className }: MarkdownBodyProps) {
                 </a>
               );
             }
+            const isExternal = href && /^https?:\/\//.test(href);
             return (
-              <a href={href} rel="noreferrer">
+              <a href={href} rel="noreferrer" {...(isExternal ? { target: "_blank" } : {})}>
                 {linkChildren}
               </a>
             );
