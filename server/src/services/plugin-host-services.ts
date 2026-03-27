@@ -599,10 +599,6 @@ export function buildHostServices(
           // Resolve once, then connect directly to that IP to prevent DNS rebinding.
           const target = await validateAndResolveFetchUrl(params.url);
 
-          if (controller.signal.aborted) {
-            throw new Error("Plugin fetch aborted — deadline exceeded during DNS resolution");
-          }
-
           const init = params.init as RequestInit | undefined;
           return await executePinnedHttpRequest(target, init, controller.signal);
         } finally {
