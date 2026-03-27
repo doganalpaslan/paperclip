@@ -3870,9 +3870,9 @@ export function heartbeatService(db: Db) {
           )
       `);
 
-      if (staleIssues.rows.length === 0) return { cleared: 0 };
+      if (staleIssues.length === 0) return { cleared: 0 };
 
-      const staleIds = staleIssues.rows.map((r: Record<string, unknown>) => r.id as string);
+      const staleIds = staleIssues.map((r: Record<string, unknown>) => r.id as string);
 
       await db
         .update(issues)
